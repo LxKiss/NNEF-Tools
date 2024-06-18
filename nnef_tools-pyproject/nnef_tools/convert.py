@@ -11,14 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+
+import numpy as np
+import six
 
 from .conversion import *
 from .model import utils
-import numpy as np
-import importlib
-import argparse
-import json
-import six
+from pathlib import Path
 
 
 def get_reader(input_format, decomposed, fold_constants, custom_shapes):
@@ -217,55 +221,79 @@ def check_nan_or_inf(graph, which):
     return valid
 
 
-def main(args):
-    io_transpose = False if args.io_transpose is None else True if len(args.io_transpose) == 0 else args.io_transpose
+def convert(
+    input_model: Path | str,
+    input_format: str,
+    output_format: str,
+    output_model: Path | str | None = None,
+    input_shapes: str | dict[str, tuple[int, ...]] | None = None,
+    io_transpose: str | None = None,
+    fold_constants: bool = False,
+    optimize: bool = False,
+    dequantize: bool = False,
+    custom_converters: list[str] | None = None,
+    custom_shapes: list[str] | None = None,
+    custom_fragments: list[str] | None = None,
+    custom_optimizers: list[str] | None = None,
+    mirror_unsupported: bool = False,
+    generate_custom_fragments: bool = False,
+    keep_io_names: bool = False,
+    decompose: list[str] | None = None,
+    input_names: list[str] | None = None,
+    output_names: list[str] | None = None,
+    static_only: bool = False,
+    tensor_mapping: Path | str | None = None,
+    annotate_shapes: bool = False,
+    compress: int | None = None,
+) -> int:
+    io_transpose = False if io_transpose is None else True if len(io_transpose) == 0 else io_transpose
 
-    custom_transforms, custom_functions = get_custom_converters(args.custom_converters) \
-        if args.custom_converters is not None else (None, None)
+    custom_transforms, custom_functions = get_custom_converters(custom_converters) \
+        if custom_converters is not None else (None, None)
 
-    custom_shapes = get_custom_shapes(args.custom_shapes) or {} if args.custom_shapes is not None else {}
+    custom_shapes = get_custom_shapes(custom_shapes) or {} if custom_shapes is not None else {}
 
     converter = None
-    if needs_conversion(args.input_format, args.output_format):
-        converter = get_converter(args.input_format, args.output_format, io_transpose,
+    if needs_conversion(input_format, output_format):
+        converter = get_converter(input_format, output_format, io_transpose,
                                   custom_transforms, custom_functions, custom_shapes,
-                                  args.mirror_unsupported, args.keep_io_names)
+                                  mirror_unsupported, keep_io_names)
         if converter is None:
-            print("Unsupported conversion: {} to {}".format(args.input_format, args.output_format))
+            print("Unsupported conversion: {} to {}".format(input_format, output_format))
             return -1
 
     decomposed = converter.decomposed_operations() if converter else []
     fragments = converter.defined_operations() if converter else {}
     dependencies = converter.defined_operation_dependencies() if converter else {}
 
-    if args.decompose is not None:
-        decomposed += args.decompose
+    if decompose is not None:
+        decomposed += decompose
 
     if converter is not None:
         custom_shapes.update(converter.defined_shapes())
 
-    if args.custom_fragments is not None:
-        fragments.update(get_custom_fragments(args.custom_fragments))
+    if custom_fragments is not None:
+        fragments.update(get_custom_fragments(custom_fragments))
 
-    reader = get_reader(args.input_format, decomposed=decomposed, fold_constants=args.fold_constants,
+    reader = get_reader(input_format, decomposed=decomposed, fold_constants=fold_constants,
                         custom_shapes=custom_shapes)
     if reader is None:
-        print("Unsupported input-format: {}".format(args.input_format))
+        print("Unsupported input-format: {}".format(input_format))
         return -1
 
-    writer = get_writer(args.output_format,
+    writer = get_writer(output_format,
                         fragments=fragments, fragment_dependencies=dependencies,
-                        generate_fragments=args.generate_custom_fragments,
-                        annotate_shapes=args.annotate_shapes, compression=args.compress)
+                        generate_fragments=generate_custom_fragments,
+                        annotate_shapes=annotate_shapes, compression=compress)
     if writer is None:
-        print("Unsupported output-format: {}".format(args.output_format))
+        print("Unsupported output-format: {}".format(output_format))
         return -1
 
-    default_output_model = args.input_model + '.' + (args.output_format if args.output_format != 'tf' else 'pb')
+    default_output_model = str(input_model) + '.' + (output_format if output_format != 'tf' else 'pb')
 
     reader_kwargs = {}
-    if args.input_shapes is not None:
-        input_shapes = eval(args.input_shapes)
+    if input_shapes is not None:
+        input_shapes = eval(input_shapes) if isinstance(input_shapes, str) else input_shapes
         if not isinstance(input_shapes, dict) or not all(isinstance(name, str) and isinstance(shape, tuple)
                                                         for name, shape in six.iteritems(input_shapes)):
             print("'Input-shape' must be a dict of strings to tuples")
@@ -274,16 +302,16 @@ def main(args):
         reader_kwargs['input_shapes'] = input_shapes
 
     try:
-        graph = reader(args.input_model, **reader_kwargs)
+        graph = reader(str(input_model), **reader_kwargs)
 
         if not check_nan_or_inf(graph, 'Input'):
             return -1
 
-        if args.input_names is not None or args.output_names is not None:
+        if input_names is not None or output_names is not None:
             not_found_names = []
 
-            if args.input_names is not None:
-                input_names = set(args.input_names)
+            if input_names is not None:
+                input_names = set(input_names)
                 inputs = [tensor for tensor in graph.tensors if tensor.name in input_names]
 
                 if len(inputs) != len(input_names):
@@ -292,8 +320,8 @@ def main(args):
                 else:
                     graph.inputs = inputs
 
-            if args.output_names is not None:
-                output_names = set(args.output_names)
+            if output_names is not None:
+                output_names = set(output_names)
                 outputs = [tensor for tensor in graph.tensors if tensor.name in output_names]
 
                 if len(outputs) != len(output_names):
@@ -308,14 +336,14 @@ def main(args):
 
             utils.remove_unreachable(graph)
 
-        optimizer = get_optimizer(args.input_format)
+        optimizer = get_optimizer(input_format)
         if optimizer:
             graph = optimizer(graph, only_required=True)
 
             if not check_nan_or_inf(graph, 'Optimized input'):
                 return -1
 
-        if args.static_only:
+        if static_only:
             utils.remove_dynamic(graph)
             utils.remove_unreachable(graph)
 
@@ -326,21 +354,21 @@ def main(args):
             if not check_nan_or_inf(graph, 'Converted'):
                 return -1
 
-        tensor_mapping = converter.tensor_mapping() if args.tensor_mapping is not None and converter else None
+        tensor_mapping = converter.tensor_mapping() if tensor_mapping is not None and converter else None
 
-        if args.optimize:
-            custom_optimizers = get_custom_optimizers(args.custom_optimizers) if args.custom_optimizers is not None else None
-            optimizer = get_optimizer(args.output_format, custom_optimizers=custom_optimizers, dequantize=args.dequantize)
+        if optimize:
+            custom_optimizers = get_custom_optimizers(custom_optimizers) if custom_optimizers is not None else None
+            optimizer = get_optimizer(output_format, custom_optimizers=custom_optimizers, dequantize=dequantize)
             if optimizer:
                 tensor_lookup = {tensor.name: tensor for tensor in graph.tensors if tensor.name is not None} \
-                    if args.tensor_mapping is not None else None
+                    if tensor_mapping is not None else None
 
                 graph = optimizer(graph)
 
                 if not check_nan_or_inf(graph, 'Optimized output'):
                     return -1
 
-                if args.tensor_mapping is not None:
+                if tensor_mapping is not None:
                     if converter:
                         tensor_mapping = {src: tensor_lookup[dst].name for src, dst in six.iteritems(tensor_mapping)
                                           if tensor_lookup[dst].graph is graph}
@@ -348,14 +376,14 @@ def main(args):
                         tensor_mapping = {name: tensor.name for name, tensor in six.iteritems(tensor_lookup)
                                           if tensor.graph is graph}
 
-        writer(graph, args.output_model or default_output_model)
-        print("Written '{}'".format(args.output_model or default_output_model))
+        writer(graph, str(output_model) or default_output_model)
+        print("Written '{}'".format(str(output_model) or default_output_model))
 
-        if args.tensor_mapping is not None:
-            with open(args.tensor_mapping, 'w') as file:
+        if tensor_mapping is not None:
+            with open(tensor_mapping, 'w') as file:
                 json.dump(tensor_mapping, file, indent=4)
 
-            print("Written '{}'".format(args.tensor_mapping))
+            print("Written '{}'".format(tensor_mapping))
 
         return 0
     except IOError as e:
@@ -371,9 +399,9 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-model', type=str, required=True,
+    parser.add_argument('--input-model', type=Path, required=True,
                         help='The input model')
-    parser.add_argument('--output-model', type=str, default=None,
+    parser.add_argument('--output-model', type=Path, default=None,
                         help='The output model')
     parser.add_argument('--input-format', type=str, required=True,
                         choices=['tf', 'tflite', 'onnx', 'nnef', 'caffe2', 'caffe'],
@@ -413,10 +441,10 @@ if __name__ == '__main__':
                         help='Names of output tensor where the graph is cut before conversion')
     parser.add_argument('--static-only', action='store_true',
                         help='Only convert static part of the graph, for which tensor shapes are known')
-    parser.add_argument('--tensor-mapping', type=str, nargs='?', default=None, const='tensor_mapping.json',
+    parser.add_argument('--tensor-mapping', type=Path, nargs='?', default=None, const='tensor_mapping.json',
                         help='Export mapping of tensor names from input to output model')
     parser.add_argument('--annotate-shapes', action='store_true',
                         help='Add tensor shapes as comments to NNEF output model')
     parser.add_argument('--compress', type=int, nargs='?', default=None, const=1,
                         help='Compress output NNEF folder at the given compression level')
-    exit(main(parser.parse_args()))
+    exit(convert(**vars(parser.parse_args())))

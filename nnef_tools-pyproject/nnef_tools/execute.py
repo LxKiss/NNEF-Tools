@@ -11,18 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
-from .utils import stdio
-from .interpreter import Statistics
-from collections import namedtuple
-import importlib
 import argparse
-import numpy as np
+import importlib
 import json
-import nnef
-import six
-import sys
 import os
+import sys
+from collections import namedtuple
+from pathlib import Path
+
+import nnef
+import numpy as np
+import six
+
+from .interpreter import Statistics
+from .utils import stdio
 
 
 _onnx_dtype_to_numpy = {
@@ -435,16 +439,30 @@ def accumulate_statistics(global_stats, local_stats):
     return global_stats
 
 
-def main(args):
-    if args.input_path is not None:
-        source = FileInputSource(args.input_path, args.io_transpose)
-    elif args.random is not None:
-        if args.batch_size == 0:
+def execute(
+    model: Path | str,
+    format: str,
+    random: str | None = None,
+    seed: int | None = None,
+    input_path: Path | str | None = None,
+    output_path: Path | None = None,
+    output_names: dict[str, Path | str] | None = None,
+    io_transpose: list[str] | None = None,
+    decompose: list[str] | None = None,
+    statistics: Path | str | None = None,
+    custom_operators: list[str] | None = None,
+    batch_size: int | None = None,
+    tensor_mapping: Path | str | None = None,
+) -> int:
+    if input_path is not None:
+        source = FileInputSource(str(input_path), io_transpose)
+    elif random is not None:
+        if batch_size == 0:
             print('batch-size must not be 0 when inputs are random generated', file=sys.stderr)
             return -1
 
         try:
-            distribution = eval(args.random)
+            distribution = eval(random)
             if not _is_lambda(distribution):
                 distribution = distribution()
             source = RandomInputSource(distribution)
@@ -457,18 +475,21 @@ def main(args):
             return -1
 
         stdio.set_stdin_to_binary()
-        source = StreamInputSource(sys.stdin, args.io_transpose)
+        source = StreamInputSource(sys.stdin, io_transpose)
 
-    output_names = eval(args.output_names) if args.output_names is not None and args.output_names != "*" else args.output_names
-    custom_operators = get_custom_operators(args.custom_operators) if args.custom_operators is not None else None
+    # Compatibility with older versions
+    if isinstance(output_names, dict):
+        output_names = {k: str(v) for k,v in output_names.items()}
+    output_names = eval(output_names) if output_names is not None and isinstance(output_names, str) and output_names != "*" else output_names
+    custom_operators = get_custom_operators(custom_operators) if custom_operators is not None else None
 
-    if args.random is not None and args.seed is not None:
-        np.random.seed(args.seed)
+    if random is not None and seed is not None:
+        np.random.seed(seed)
 
-    collect_statistics = args.statistics is not None
+    collect_statistics = statistics is not None
 
     try:
-        executor = get_executor(args.format, args.model, collect_statistics, custom_operators, args.decompose)
+        executor = get_executor(format, str(model), collect_statistics, custom_operators, decompose)
 
         if isinstance(output_names, dict):
             fetch_names = output_names.keys()
@@ -479,14 +500,14 @@ def main(args):
             fetch_names = output_names
 
         input_info = executor.input_info()
-        if args.batch_size is not None:
-            input_info = batched_info(input_info, args.batch_size)
+        if batch_size is not None:
+            input_info = batched_info(input_info, batch_size)
 
         output_info = executor.output_info()
 
         inputs = {info.name: source(info.name, info.shape, info.dtype) for info in input_info}
 
-        batch_size = args.batch_size
+        batch_size = batch_size
         if batch_size == 0:
             batch_size = next(iter(six.itervalues(inputs))).shape[0]
             if not all(input.shape[0] == batch_size for input in six.itervalues(inputs)):
@@ -517,26 +538,25 @@ def main(args):
         return -1
 
     for name, value in six.iteritems(outputs):
-        if needs_transpose(args.io_transpose, name):
+        if needs_transpose(io_transpose, name):
             outputs[name] = transpose_channels_last_to_first(value)
 
     if isinstance(output_names, dict):
         outputs = {output_names[name]: value for name, value in six.iteritems(outputs)}
 
-    if args.tensor_mapping is not None:
-        with open(args.tensor_mapping) as file:
-            tensor_mapping = json.load(file)
+    if tensor_mapping is not None:
+        mapping = json.loads(Path(str(tensor_mapping)).read_text())
 
         if stats is not None:
-            stats = {tensor_mapping.get(key, key): value for key, value in six.iteritems(stats)}
+            stats = {mapping.get(key, key): value for key, value in six.iteritems(stats)}
 
     if stats is not None:
-        write_statistics(args.statistics, stats)
-        print('Written {}'.format(args.statistics))
+        write_statistics(str(statistics), stats)
+        print('Written {}'.format(str(statistics)))
 
-    if args.output_path is not None:
+    if output_path is not None:
         for name, value in six.iteritems(outputs):
-            filename = os.path.join(args.output_path, name + ".dat")
+            filename = os.path.join(str(output_path), name + ".dat")
             write_nnef_tensor(filename, value)
             print('Written {}'.format(filename))
     else:
@@ -557,7 +577,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('model', type=str,
+    parser.add_argument('model', type=Path,
                         help='The model to execute')
     parser.add_argument('--format', type=str, required=True, choices=['tf', 'tflite', 'onnx', 'nnef'],
                         help='The format of the model')
@@ -565,9 +585,9 @@ if __name__ == '__main__':
                         help='Random distribution for input generation')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for input generation')
-    parser.add_argument('--input-path', type=str, default=None,
+    parser.add_argument('--input-path', type=Path, default=None,
                         help='Folder to read inputs from')
-    parser.add_argument('--output-path', type=str, default=None,
+    parser.add_argument('--output-path', type=Path, default=None,
                         help='Folder to save outputs into')
     parser.add_argument('--output-names', type=str, default=None,
                         help='The set (dict) of tensor names (to file names) considered as outputs to be saved. '
@@ -576,12 +596,12 @@ if __name__ == '__main__':
                         help='The inputs/outputs to transpose from channels last to channels first dimension order')
     parser.add_argument('--decompose', type=str, nargs='*', default=None,
                         help='Names of operators to be decomposed by NNEF parser')
-    parser.add_argument('--statistics', type=str, nargs='?', default=None, const='stats.json',
+    parser.add_argument('--statistics', type=Path, nargs='?', default=None, const=Path('stats.json'),
                         help='Calculate activations statistics and save to output path in json format')
     parser.add_argument('--custom-operators', type=str, nargs='+', default=None,
                         help='Module(s) containing custom operator code')
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Specify batch-size for single-batch models')
-    parser.add_argument('--tensor-mapping', type=str, default=None,
+    parser.add_argument('--tensor-mapping', type=Path, default=None,
                         help='Use mapping of tensor names for statistics')
-    exit(main(parser.parse_args()))
+    exit(execute(**vars(parser.parse_args())))
