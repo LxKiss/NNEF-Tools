@@ -396,6 +396,8 @@ def convert(
                 print(detail)
         return -1
 
+def main(args):
+    return convert(**vars(args))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -447,4 +449,4 @@ if __name__ == '__main__':
                         help='Add tensor shapes as comments to NNEF output model')
     parser.add_argument('--compress', type=int, nargs='?', default=None, const=1,
                         help='Compress output NNEF folder at the given compression level')
-    exit(convert(**vars(parser.parse_args())))
+    exit(main(parser.parse_args()))

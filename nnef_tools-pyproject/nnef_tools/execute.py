@@ -574,6 +574,9 @@ def execute(
 
     return 0
 
+def main(args):
+    return execute(**vars(args))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -604,4 +607,4 @@ if __name__ == '__main__':
                         help='Specify batch-size for single-batch models')
     parser.add_argument('--tensor-mapping', type=Path, default=None,
                         help='Use mapping of tensor names for statistics')
-    exit(execute(**vars(parser.parse_args())))
+    exit(main((parser.parse_args())))
